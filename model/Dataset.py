@@ -38,7 +38,7 @@ class Dataset(Dataset):
         #
         #txt_file_name = basename|speaker|text|raw_text로 구성된 파일
 
-        self.preprocessed_path="/workspace/DATA/chem/processed_test"
+        self.preprocessed_path="/workspace/DATA/chem/preprocessed_3"
         #lists-name, speaker, text, raw_text
         self.basenames, self.speakers, self.texts, self.raw_texts = self.process_meta(txt_file_name)
         self.cleaners = preprocess_config["preprocessing"]["text"]["text_cleaners"]
@@ -55,7 +55,7 @@ class Dataset(Dataset):
         speaker = self.speakers[idx]
         speaker = 'chem'
         speaker_id = 0
-        
+        # 오디오 데이터 길이: lip_embedding길이/16000
         # spk_path = os.path.join(
         #     self.preprocessed_path,
         #     "spk",
@@ -71,6 +71,8 @@ class Dataset(Dataset):
             "{}-{}-mel.npy".format(speaker, basename),
         )
         mel = np.load(mel_path)
+        mel = mel.T
+
         pitch_path = os.path.join(
             self.preprocessed_path,
             "pitch",
@@ -85,7 +87,7 @@ class Dataset(Dataset):
         energy = np.load(energy_path)
         duration_path = os.path.join(
             self.preprocessed_path,
-            "duration_sum",
+            "duration",
             "{}-{}-duration.npy".format(speaker, basename),
         )
         duration = np.load(duration_path)
@@ -103,11 +105,12 @@ class Dataset(Dataset):
         lip_embedding_path = os.path.join(
             self.preprocessed_path,
             # "extrated_embedding_Chem_gray",
-            "mouth_emb",
-            "{}-{}-lip.npz".format('chem', basename),
+            "lip",
+            "{}-{}-lip.npy".format('chem', basename),
         )
 
-        lip_embedding = np.load(lip_embedding_path)
+        # lip_embedding = np.expand_dims(np.load(lip_embedding_path)['arr_0'],axis=0)
+        lip_embedding = np.expand_dims(np.load(lip_embedding_path),axis=0)
         sample = {
         "id": basename,
         "raw_text": raw_text,
@@ -129,62 +132,73 @@ class Dataset(Dataset):
         패딩(padding)을 적용하여 시퀀스 길이를 맞추거나, NumPy 배열로 변환하는 등의 작업
         전처리된 필드들을 튜플 형태로 반환
         """
-        ids = [data[idx]["id"] for idx in idxs]
-        speakers = [data[idx]["speaker"] for idx in idxs]
-        texts = [data[idx]["text"] for idx in idxs]
-        raw_texts = [data[idx]["raw_text"] for idx in idxs]
-        mels = [data[idx]["mel"] for idx in idxs]
-        pitches = [data[idx]["pitch"] for idx in idxs]
-        energies = [data[idx]["energy"] for idx in idxs]
-        durations = [data[idx]["duration"] for idx in idxs]
-        #
-        # spks = [data[idx]["spk"] for idx in idxs]
-        # emotions = [data[idx]["emotion"] for idx in idxs]
-        # emos = [data[idx]["emo"] for idx in idxs]
-        # feature_256 = [data[idx]["feature_256"] for idx in idxs]
+        try:
+            ids = [data[idx]["id"] for idx in idxs]
+            speakers = [data[idx]["speaker"] for idx in idxs]
+            texts = [data[idx]["text"] for idx in idxs]
+            raw_texts = [data[idx]["raw_text"] for idx in idxs]
+            mels = [data[idx]["mel"] for idx in idxs]
+            pitches = [data[idx]["pitch"] for idx in idxs]
+            energies = [data[idx]["energy"] for idx in idxs]
+            durations = [data[idx]["duration"] for idx in idxs]
+            #
+            # spks = [data[idx]["spk"] for idx in idxs]
+            # emotions = [data[idx]["emotion"] for idx in idxs]
+            # emos = [data[idx]["emo"] for idx in idxs]
+            # feature_256 = [data[idx]["feature_256"] for idx in idxs]
 
-        lip_embedding = [data[idx]["lip_embedding"] for idx in idxs]
+            lip_embedding = [data[idx]["lip_embedding"] for idx in idxs]
 
-        text_lens = np.array([text.shape[0] for text in texts])#16*(3024,)
-        mel_lens = np.array([mel.shape[0] for mel in mels]) #16*(18350,80)
-        lip_lens = np.array([lip_e['data'].shape[1] for lip_e in lip_embedding])#16*(1,6711,512)
-        lip_embedding = [lip_e['data'][0] for lip_e in lip_embedding]
-        speakers = np.array(speakers) # 16
-        texts = pad_1D(texts) # 16x273
-        mels = pad_2D(mels) # 16x2379x80
-        pitches = pad_1D(pitches) # 16x273
-        energies = pad_1D(energies) # 16x273
-        durations = pad_1D(durations) # 16x273 Beaca
-        # Since we don't need to use Length Regulator, convert word length to mel-spectrum length
-        durations = np.array(durations)  # 16x273
-        # spks = np.array(spks) # 16x256
-        # emotions = np.array(emotions) # 16
-        # emos = np.array(emos) # 16x256
-        # feature_256 = pad_2D(feature_256)
-        
-        lip_embedding = pad_2D(lip_embedding,max(lip_lens))
+            text_lens = np.array([text.shape[0] for text in texts])#16*(3024,)
+            mel_lens = np.array([mel.shape[0] for mel in mels]) #16*(18350,80)
+            
+            lip_lens = np.array([lip_e.shape[1] for lip_e in lip_embedding])#16*(1,6711,512)
+            
+                
+            lip_embedding = [lip_e[0] for lip_e in lip_embedding]
+            if max(lip_lens) * 4> max(mel_lens):
+                print("Lip length is longer than mel length")
+                
+            speakers = np.array(speakers) # 16
+            texts = pad_1D(texts) # 16x273
+            mels = pad_2D(mels) # 16x2379x80
+            pitches = pad_1D(pitches) # 16x273
+            energies = pad_1D(energies) # 16x273
+            durations = pad_1D(durations) # 16x273 Beaca
+            # Since we don't need to use Length Regulator, convert word length to mel-spectrum length
+            durations = np.array(durations)  # 16x273
+            # spks = np.array(spks) # 16x256
+            # emotions = np.array(emotions) # 16
+            # emos = np.array(emos) # 16x256
+            # feature_256 = pad_2D(feature_256)
+            
+            lip_embedding = pad_2D(lip_embedding,max(lip_lens))
 
-        return (
-            ids,
-            raw_texts,
-            speakers,
-            texts,
-            text_lens,
-            max(text_lens),
-            mels,
-            mel_lens,
-            max(mel_lens),
-            pitches,
-            energies,
-            durations,
-            # spks,
-            # emotions,
-            # emos,
-            # feature_256,
-            lip_lens,
-            max(lip_lens),
-            lip_embedding,
-        )
+            return (
+                ids,
+                raw_texts,
+                speakers,
+                texts,
+                text_lens,
+                max(text_lens),
+                mels,
+                mel_lens,
+                max(mel_lens),
+                pitches,
+                energies,
+                durations,
+                # spks,
+                # emotions,
+                # emos,
+                # feature_256,
+                lip_lens,
+                max(lip_lens),
+                lip_embedding,
+            )
+        except Exception as e:
+            print(e)
+            print("Error occured in reprocess")
+            return None 
     def collate_fn(self,data):
         """
         데이터 로더에 batch를 구성할때 호출되는 함수
@@ -209,7 +223,11 @@ class Dataset(Dataset):
 
         output = list()
         for idx in idx_arr:
-            output.append(self.reprocess(data, idx))
+            result = self.reprocess(data, idx)
+            if result is not None:
+                output.append(result)
+            else:
+                print("Error occured in collate_fn")
 
         return output
     def process_meta(self, filename):

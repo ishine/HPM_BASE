@@ -80,14 +80,14 @@ class Multi_head_Duration_Aligner(nn.Module):
     ):
         output_lip = self.lip_encoder(lip_embedding, lip_masks)
         output_text = self.encoder(texts, src_masks)
-        
-        # Before calculating attention between phoneme and lip-motion sequence, the text information will be fused with the speaker identity, following the paper.
-        sss = reference_embedding.unsqueeze(1).expand(-1, max_src_len, -1)
-        contextual_sss, _ = self.attn_text_spk(query=output_text.transpose(0, 1), key=sss.transpose(0, 1),
-                                        value=sss.transpose(0, 1), key_padding_mask=src_masks)
+        if reference_embedding is not None:
+            # Before calculating attention between phoneme and lip-motion sequence, the text information will be fused with the speaker identity, following the paper.
+            sss = reference_embedding.unsqueeze(1).expand(-1, max_src_len, -1)
+            contextual_sss, _ = self.attn_text_spk(query=output_text.transpose(0, 1), key=sss.transpose(0, 1),
+                                            value=sss.transpose(0, 1), key_padding_mask=src_masks)
 
-        contextual_sss = contextual_sss.transpose(0,1)
-        output_text = contextual_sss + output_text
+            contextual_sss = contextual_sss.transpose(0,1)
+            output_text = contextual_sss + output_text
         
         output, _ = self.attn(query=output_lip.transpose(0, 1), key=output_text.transpose(0, 1),
                                         value=output_text.transpose(0, 1), key_padding_mask=src_masks)

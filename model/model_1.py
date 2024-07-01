@@ -3,6 +3,9 @@
 # Speaker Feature
 # Lip-M Feature
 # 만 넣어서 Mel Generator -> Vocoder 수행
+import distutils
+import distutils.version
+distutils.version.LooseVersion = lambda x: x
 import wandb
 import os
 import json
@@ -11,13 +14,14 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import matplotlib
+matplotlib.use('Agg')
 from scipy.io import wavfile
 from matplotlib import pyplot as plt
 import sys
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 
-sys.path.append("/workspace/CODE/Jenny_Test/model")
-sys.path.append("/workspace/CODE/Jenny_Test/transformer")
+sys.path.append("/workspace/HPM_BASE/model")
+sys.path.append("/workspace/HPM_BASE/transformer")
 sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
 import torch
 import torch.nn as nn
@@ -27,29 +31,38 @@ from attrdict import AttrDict
 import wandb
 # from modules_1 import Multi_head_Duration_Aligner
 from Multi_head_Duration_Aligner import Multi_head_Duration_Aligner
-from transformer import Decoder
+from transformer import Decoder,PostNet
 device = torch.device("cuda")
-
+if torch.cuda.device_count() > 1:
+    print(f"Using {torch.cuda.device_count()} GPUs")
+# print(f"CUDA Available: {torch.cuda.is_available()}")
+# print(f"Device Count: {torch.cuda.device_count()}")
 # wandb.init(project ="HPM_Dubb")
 
 from Dataset import Dataset
 from torch.utils.data import DataLoader
 import torch.nn as nn
 import yaml
-from utils.tools import to_device , synth_one_sample,log
+from utils.tools import tool_to_device , synth_one_sample,log
 from tqdm import tqdm
 from optimizer import ScheduledOptim
 from torch.utils.tensorboard import SummaryWriter
+from utils.stft import TorchSTFT
+from utils.env import AttrDict
+from utils.hifigan_16_models import Generator
+from utils.istft_models import istft_Generator
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.multiprocessing as mp
 # from tensorboardX import SummaryWriter
-with open('/workspace/CODE/Jenny_Test/config/Chem/preprocess.yaml') as f:
+with open('/workspace/HPM_BASE/config/Chem/preprocess.yaml') as f:
     preprocess_config = yaml.load(f, Loader=yaml.FullLoader)
 
-with open('/workspace/CODE/Jenny_Test/config/Chem/model.yaml') as f:
+with open('/workspace/HPM_BASE/config/Chem/model.yaml') as f:
     model_config = yaml.load(f, Loader=yaml.FullLoader)
 #prepare model 
 # model, optimizer = get_model()#(configs, device, train=True)
 
-
+wandb_flag = True
 # def get_model():
 def get_mask_from_lengths(lengths, max_len=None):
     batch_size = lengths.shape[0]
@@ -75,7 +88,9 @@ class HPM_Dubb_1(nn.Module):
         
         # Multi head duration aligner 
         self.MDA = Multi_head_Duration_Aligner(model_config)
-        self.proj_fusion = nn.Conv1d(768, 256, kernel_size=1, padding=0, bias=False)
+        # self.proj_fusion = nn.Conv1d(768, 256, kernel_size=1, padding=0, bias=False)
+        self.postnet = PostNet()
+        self.proj_fusion = nn.Conv1d(256, 256, kernel_size=1, padding=0, bias=False)
         self.decoder = Decoder(model_config)
         self.mel_linear = nn.Linear(
             model_config["transformer"]["decoder_hidden"],
@@ -108,15 +123,15 @@ class HPM_Dubb_1(nn.Module):
             # max_lip_lens=None,
             # spks=None,
             self,
-            ids,
-            raw_texts,
-            speakers,
-            texts,
-            src_lens,
-            max_src_len,
-            mels,
-            mel_lens,
-            max_mel_len,
+            ids,#0
+            raw_texts,#1
+            speakers,#2
+            texts,#3
+            src_lens,#4
+            max_src_len,#5
+            mels,#6
+            mel_lens,#7
+            max_mel_len,#8
             pitches,
             energies,
             durations,
@@ -132,27 +147,47 @@ class HPM_Dubb_1(nn.Module):
         src_masks = get_mask_from_lengths(src_lens, max_src_len) 
         lip_masks = get_mask_from_lengths(lip_lens, max_lip_lens)
         if useGT:
+            # print(f"HPM_Dubb_1 : max_mel_len : {max_mel_len}")
             mel_masks = (
                 get_mask_from_lengths(mel_lens, max_mel_len)
             )
         else:
+            # print(f"HPM_Dubb_1 : max_mel_len : {max_mel_len}")
             mel_masks = (
                 get_mask_from_lengths(lip_lens*self.Synchronization_coefficient, max_lip_lens*self.Synchronization_coefficient)
             )
         #lip_embedding,lip_masks,texts,src_masks,max_src_len,lip_lens,src_lens,reference_embedding = None,
         
         output, ctc_pred_MDA_video = self.MDA(lip_embedding,lip_masks,texts,src_masks,max_src_len,lip_lens,src_lens)#,reference_embedding= spks)
+        # 길이 조정(추가사항)
+                # 길이 조정
+        B, L, D = output.size()
+        target_length = max_mel_len
+        output = output.transpose(1, 2)  # [B, D, L]
+        output = F.interpolate(output, size=target_length, mode='nearest')
+        output = output.transpose(1, 2)  # [B, target_length, D]
+        # print("[MDA]interpolated output shape:", output.shape)
+        # ctc_pred_MDA_video도 같은 방식으로 조정
+        ctc_pred_MDA_video = ctc_pred_MDA_video.transpose(1, 2)
+        ctc_pred_MDA_video = F.interpolate(ctc_pred_MDA_video, size=target_length, mode='nearest')
+        ctc_pred_MDA_video = ctc_pred_MDA_video.transpose(1, 2)
+        # output = F.interpolate(output.transpose(1, 2), scale_factor=self.Synchronization_coefficient, mode='nearest').transpose(1, 2)
         # Following the paper concatenation the three information
         fusion_output = torch.cat([output], dim=-1)
         fusion_output = self.proj_fusion(fusion_output.transpose(1, 2)).transpose(1, 2)
 
 
         """=========Mel-Generator========="""
+        # print("[proj_fusion]fusion_output shape:", fusion_output.shape)
+        # print("mel_masks shape:", mel_masks.shape)
+
         fusion_output, mel_masks = self.decoder(fusion_output, mel_masks)
+        # print("[decoder]fusion_output shape:", fusion_output.shape)
         ctc_pred_mel = self.CTC_classifier_mel(fusion_output)
-        
+        # print("[ctc_classifier_mel]ctc_pred_mel shape:", ctc_pred_mel.shape)
         fusion_output = self.mel_linear(fusion_output)
-        # postnet_output = self.postnet(fusion_output) + fusion_output
+        # print("[mel_linear]fusion_output shape:", fusion_output.shape)
+        postnet_output = self.postnet(fusion_output) + fusion_output
         
         ctc_loss_all = [ctc_pred_MDA_video, ctc_pred_mel]
         
@@ -162,7 +197,14 @@ class HPM_Dubb_1(nn.Module):
         #Mel Decoder 
         #Mel Linear
 
-        return fusion_output,src_masks, mel_masks, ctc_loss_all
+        return (
+            fusion_output,
+            postnet_output,
+            src_masks, 
+            mel_masks, 
+            src_lens,
+            lip_lens*self.Synchronization_coefficient,
+            ctc_loss_all)
 
 
 class HPM_Dubb_1_Loss(nn.Module):
@@ -191,13 +233,13 @@ class HPM_Dubb_1_Loss(nn.Module):
             texts,
             src_lens,
             max_src_len,
-            mels,
+            mel_targets,
             mel_lens,
             max_mel_len,
-            _,
-            _,
-            _,
-            _,
+            pitch_targets,#prosody adaptor에서
+            energy_targets,
+            duration_targets,
+            # _,#spk
             lip_lens,
             max_lip_lens,
             _,
@@ -205,45 +247,71 @@ class HPM_Dubb_1_Loss(nn.Module):
 
         (
             mel_predictions,
+            postnet_mel_predictions,
             src_masks,
             mel_masks,
+            _,
+            _,
             ctc_loss_all,
         ) = predictions
-
+        '''
+                    fusion_output,
+                    postnet_output,
+                    src_masks, 
+                    mel_masks, 
+                    src_lens,
+                    lip_lens*self.Synchronization_coefficient,
+                    ctc_loss_all
+        '''
         src_masks = ~src_masks
         mel_masks = ~mel_masks
-
-        mels = mels[:, : mel_masks.shape[1], :]
+        # Clamp mel_lens to a maximum of 1000
+        max_length = 1000
+        # mel_lens = torch.clamp(mel_lens, max=max_length)
+        mel_targets = mel_targets[:, : mel_masks.shape[1], :]
         mel_masks = mel_masks[:, :mel_masks.shape[1]]
-        mels.requires_grad = False
+        mel_targets.requires_grad = False
 
         ctc_pred_MDA_video = ctc_loss_all[0]
         ctc_pred_mel = ctc_loss_all[1]
-
+        # print("[loss input]ctc_pred_mel shape:", ctc_pred_mel.shape)
         CTC_loss_MDA_video = self.CTC_criterion(ctc_pred_MDA_video.transpose(0, 1).log_softmax(2), texts, lip_lens, src_lens) / texts.shape[0]
         CTC_loss_MEL = self.CTC_criterion(ctc_pred_mel.transpose(0, 1).log_softmax(2), texts, mel_lens, src_lens) / texts.shape[0]
 
-        mse_loss_v2c = self.mse_loss_v2c(mel_predictions, mels)
-
+        mse_loss_v2c1 = self.mse_loss_v2c(mel_predictions, mel_targets)
+        mse_loss_v2c2 = self.mse_loss_v2c(postnet_mel_predictions, mel_targets)       
+        
         mel_predictions = mel_predictions.masked_select(mel_masks.unsqueeze(-1))
-        mels = mels.masked_select(mel_masks.unsqueeze(-1))
+        postnet_mel_predictions = postnet_mel_predictions.masked_select(mel_masks.unsqueeze(-1))
 
-        mel_loss = self.mae_loss(mel_predictions, mels)
-
+        mel_targets = mel_targets.masked_select(mel_masks.unsqueeze(-1))
+        mel_loss = self.mae_loss(mel_predictions, mel_targets)
+        postnet_mel_loss = self.mae_loss(postnet_mel_predictions, mel_targets)
+        
+        #pitch, energy
+        # total_loss = L_s
+        # L_s = lambda_1*L_mel + L_postnet + L_v2c1 + L_v2c2 + L_ctc1 + L_ctc2
         total_loss = (
-            mel_loss + mse_loss_v2c + 0.01 * CTC_loss_MDA_video + 0.01 * CTC_loss_MEL
+            1.3*mel_loss + 
+            1.3*postnet_mel_loss + 
+            mse_loss_v2c1 + 
+            mse_loss_v2c2 + 
+            0.01 * CTC_loss_MDA_video 
+            + 0.01 * CTC_loss_MEL
         )
 
         return (
             total_loss,
             mel_loss,
-            mse_loss_v2c,
+            postnet_mel_loss,
+            mse_loss_v2c1,
+            mse_loss_v2c2,
             0.01 * CTC_loss_MDA_video,
             0.01 * CTC_loss_MEL,
         )
 
 def get_vocoder():
-        checkpoint_path= "/workspace/CODE/Jenny_Test/vocoder/HiFi_GAN_16"
+        checkpoint_path= "/workspace/HPM_BASE/vocoder/HiFi_GAN_16"
         name = "HiFi_GAN_16"
         config_file = os.path.join(checkpoint_path, "config.json")
         with open(config_file) as f:
@@ -260,25 +328,54 @@ def get_vocoder():
         vocoder.eval()
         vocoder.remove_weight_norm()
         return vocoder
+def vocoder_infer(mels, vocoder, model_config, preprocess_config, lengths=None):
+    name = model_config["vocoder"]["model"]  # HiFi_GAN_16
+    with torch.no_grad():
+        if name == "MelGAN":
+            wavs = vocoder.inverse(mels / np.log(10))
+        elif name == "HiFi-GAN":
+            wavs = vocoder(mels).squeeze(1)  # torch.Size([1, 80, 448])
+        elif name == "HiFi_GAN_16":
+            wavs = vocoder(mels).squeeze(1)
+        elif name == "HiFi_GAN_220":
+            wavs = vocoder(mels).squeeze(1)
+        elif name == "ISTFTNET":
+            stft = TorchSTFT(filter_length=16, hop_length=4, win_length=16).to(device)
+            spec, phase = vocoder(mels)
+            y_g_hat = stft.inverse(spec, phase)
+            wavs = y_g_hat.squeeze(1)
 
+    wavs = (
+            wavs.cpu().numpy()
+            * preprocess_config["preprocessing"]["audio"]["max_wav_value"]
+    ).astype("int16")
+    wavs = [wav for wav in wavs]
+
+    for i in range(len(mels)):
+        if lengths is not None:
+            wavs[i] = wavs[i][: lengths[i]]
+
+    return wavs
 
 # GPU 상태 로깅 함수
-# GPU 7번에 대한 상태 로깅 함수
+# GPU 0번에 대한 상태 로깅 함수
 def log_gpu_status():
     gpu_status = {}
-    gpu_id = 7
+    gpu_id = 0
     gpu_status[f"GPU_{gpu_id}_Memory_Used"] = torch.cuda.memory_allocated(gpu_id)
     gpu_status[f"GPU_{gpu_id}_Memory_Total"] = torch.cuda.get_device_properties(gpu_id).total_memory
-    wandb.log(gpu_status)
+    if wandb_flag:
+        wandb.log(gpu_status)
 def main():
 
 # wandb 초기화
     train_config = yaml.load(
-        open("/workspace/CODE/Jenny_Test/config/Chem/train.yaml", "r"), Loader=yaml.FullLoader
+        open("/workspace/HPM_BASE/config/Chem/train.yaml", "r"), Loader=yaml.FullLoader
     )
-    wandb.init(project="HPM_step1_test1", config=train_config)
-    # GPU 상태 설정
-    wandb.config.log_gpu_status = True
+    if wandb_flag:
+        wandb.init(project="HPM_step1_test1", config=train_config)
+        # GPU 상태 설정
+        wandb.config.log_gpu_status = True
 
     flag = True
     print("main function")
@@ -286,7 +383,7 @@ def main():
     #/workspace/DATA/chem/processed
 
     train_dataset = Dataset(
-        "/workspace/DATA/chem/processed_test/train.txt",
+        "/workspace/DATA/chem/preprocessed_3/train.txt",
         preprocess_config,
         train_config["optimizer"]["batch_size"],
     )
@@ -302,7 +399,7 @@ def main():
         train_dataset,
         batch_size=batch_size * group_size,
         shuffle=True,
-        num_workers=16,
+        num_workers=1,
         pin_memory=True,   
         collate_fn=train_dataset.collate_fn,
     )
@@ -322,9 +419,9 @@ def main():
     Loss = HPM_Dubb_1_Loss(preprocess_config, model_config).to(device)
     vocoder = get_vocoder()
     # logger 
-    train_log_path = "/workspace/CODE/Jenny_Test/model/log/Chem/train"
+    train_log_path = "/workspace/HPM_BASE/model/log/Chem/train"
     os.makedirs(train_log_path, exist_ok=True)
-    train_logger = SummaryWriter(train_log_path)
+    train_logger = SummaryWriter(train_log_path, flush_secs=10)
     # Training
     step =0
     epoch = 0
@@ -340,14 +437,16 @@ def main():
     outer_bar = tqdm(total=total_step, desc="Training", position=0)
     outer_bar.n =0
     outer_bar.update()
-    wandb.watch(model)
+    if wandb_flag:
+        wandb.watch(model)
     while True:
         epoch += 1
         for batchs in train_loader:
             for batch in batchs:
-                batch = to_device(batch, device)
+                batch = tool_to_device(batch, device)
+                
                 #Forward
-                output = model(*(batch))
+                output = model(*batch)
                 #Cal Loss 
                 losses = Loss(batch, output)
                 total_loss = losses[0]
@@ -365,7 +464,7 @@ def main():
                 total_loss = total_loss / grad_acc_step
                 total_loss.backward()
 
-                if step % log_step==0:
+                if wandb_flag and step % log_step==0:
                 # wandb logging
                     wandb.log({"loss": total_loss.item(), 
                             "mel_loss": losses[1].item(), 
@@ -390,33 +489,60 @@ def main():
                         model_config,
                         preprocess_config,
                     )
-                    log(
-                        train_logger,
-                        fig=fig,
-                        tag="Training/step_{}_{}".format(step, tag),
-                    )
-                    sampling_rate = preprocess_config["preprocessing"]["audio"][
-                        "sampling_rate"
-                    ]
+                    fig.savefig('synth_sample.png',dpi=300)
 
-                    log(
-                        train_logger,
-                        audio=wav_reconstruction,
-                        sampling_rate=sampling_rate,
-                        tag="Training/step_{}_{}_reconstructed".format(step, tag),
-                    )
-                    log(
-                        train_logger,
-                        audio=wav_prediction,
-                        sampling_rate=sampling_rate,
-                        tag="Training/step_{}_{}_synthesized".format(step, tag),
-                    )
+                    wandb.log({
+                        "Synth_Sample": [
+                            wandb.Image('synth_sample.png')
+                        ]
+                    })
+                    '''
+                    plt.imshow(attention_map, aspect='auto', origin='lower', interpolation='none')
+                    plt.savefig('attention_map.png', figsize=(16, 4))
+
+                    wandb.log({
+                        "Attention Map": [
+                            wandb.Image('attention_map.png')
+                        ]
+                    })
+                    '''
+                    sampling_rate = preprocess_config["preprocessing"]["audio"]["sampling_rate"]
+                    
+                    # Log synthesized audio samples
+                    wandb.log({
+                        "Reconstructed_Audio": wandb.Audio(wav_reconstruction, sample_rate=sampling_rate, caption=f"Step {step} Reconstructed"),
+                        "Synthesized_Audio": wandb.Audio(wav_prediction, sample_rate=sampling_rate, caption=f"Step {step} Synthesized")
+                    })
+                    # log(
+                    #     train_logger,
+                    #     fig=fig,
+                    #     tag="Training/step_{}_{}".format(step, tag),
+                    # )
+                    # sampling_rate = preprocess_config["preprocessing"]["audio"][
+                    #     "sampling_rate"
+                    # ]
+
+                    # log(
+                    #     train_logger,
+                    #     audio=wav_reconstruction,
+                    #     sampling_rate=sampling_rate,
+                    #     tag="Training/step_{}_{}_reconstructed".format(step, tag),
+                    # )
+                    # log(
+                    #     train_logger,
+                    #     audio=wav_prediction,
+                    #     sampling_rate=sampling_rate,
+                    #     tag="Training/step_{}_{}_synthesized".format(step, tag),
+                    # )
                 if step == total_step:
+                    if wandb_flag:
+                        wandb.finish()
                     quit()
-                    wandb.finish()
+
                 step += 1
                 outer_bar.update(1)
-    wandb.finish()     
+
+     
 
 if __name__ == "__main__":
     print("main")

@@ -2,8 +2,8 @@ transformer:
   encoder_layer: 6
   encoder_head: 8
   encoder_hidden: 256
-  decoder_layer: 8
-  decoder_head: 8
+  decoder_layer: 4
+  decoder_head: 4
   decoder_hidden: 256
   conv_filter_size: 1024
   conv_kernel_size: [9, 1]
@@ -58,7 +58,7 @@ Symbols:
 learn_speaker: False # whether use Embedding layer to learn speaker embedding
 learn_emotion: False # whether use Embedding layer to learn emotion embedding
 
-max_seq_len: 1000
+max_seq_len: 4000
 
 vocoder:
   model: "HiFi_GAN_16" # support 'HiFi-GAN', 'MelGAN', 'HiFi_GAN_16', "ISTFTNET"

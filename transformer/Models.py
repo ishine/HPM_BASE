@@ -241,10 +241,12 @@ class Decoder(nn.Module):
         )
 
     def forward(self, enc_seq, mask, return_attns=False):
-
+        # print("Decoder input shapes:")
+        # print("  enc_seq:", enc_seq.shape)
+        # print("  mask:", mask.shape)
         dec_slf_attn_list = []
         batch_size, max_len = enc_seq.shape[0], enc_seq.shape[1]
-
+        # print("self.max_seq_len:", self.max_seq_len)
         # -- Forward
         if not self.training and enc_seq.shape[1] > self.max_seq_len:
             # -- Prepare masks

@@ -5,15 +5,18 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import matplotlib
+matplotlib.use("Agg")
 from scipy.io import wavfile
 from matplotlib import pyplot as plt
+from PIL import Image
+from torchvision.transforms import ToTensor
+import io
 
-matplotlib.use("Agg")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
 
-def to_device(data, device):
+def tool_to_device(data, device):
     # # used for V2C-Net from Chenqi, et.al
     # if len(data) == 15:
     #     (
@@ -175,7 +178,7 @@ def to_device(data, device):
     #         mels, pitches, energies, durations, mel_lens)
     
     #step 1
-    if len(data) == 16:
+    if len(data) == 15:
             (
                 ids,
                 raw_texts,
@@ -190,7 +193,7 @@ def to_device(data, device):
                 energies,
                 durations,
                 #
-                spks,
+                # spks,
                 # emotions,
                 # emos,
                 # feature_256,
@@ -209,7 +212,7 @@ def to_device(data, device):
             energies = torch.from_numpy(energies).to(device)
             durations = torch.from_numpy(durations).long().to(device)
             #
-            spks = torch.from_numpy(spks).float().to(device)
+            # spks = torch.from_numpy(spks).float().to(device)
             # emotions = torch.from_numpy(emotions).long().to(device)
             # emos = torch.from_numpy(emos).float().to(device)
             # feature_256 = torch.from_numpy(feature_256).float().to(device)
@@ -228,7 +231,7 @@ def to_device(data, device):
                 pitches,
                 energies,
                 durations,
-                spks,
+                # spks,
                 # emotions,
                 # emos,
                 # feature_256,
@@ -291,7 +294,15 @@ def log(
         logger.add_scalar("MCD/train_avg_mcd_dtw_sl", avg_mcd_train[2], step)
 
     if fig is not None:
-        logger.add_figure(tag, fig)
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png')
+        buf.seek(0)
+        
+        image = Image.open(buf)
+        image_tensor = ToTensor()(image)
+        # logger.add_figure(tag, fig)
+        logger.add_image(tag, image_tensor, dataformats='CHW',global_step=step)
+        
 
     if audio is not None:
         logger.add_audio(
@@ -327,8 +338,63 @@ def expand(values, durations):
         out += [value] * max(0, int(d))
     return np.array(out)
 
+'''
+predictions:
+            fusion_output,
+            postnet_output,
+            src_masks, 
+            mel_masks, 
+            src_lens,
+            lip_lens*self.Synchronization_coefficient,
+            ctc_loss_all
 
+'''
 def synth_one_sample(targets, predictions, vocoder, model_config, preprocess_config):
+    
+    mel_len = predictions[5][0].item()
+    mel_prediction = predictions[1][0, :mel_len].detach().transpose(0, 1)
+
+    basename = targets[0][0]
+    mel_len_gt = targets[7][0].item()
+    mel_target = targets[6][0, :mel_len_gt].detach().transpose(0, 1)
+    pitch = targets[9][0, :mel_len].detach().cpu().numpy()
+    energy = targets[10][0, :mel_len].detach().cpu().numpy()
+
+    with open(
+        os.path.join(preprocess_config["path"]["preprocessed_path"], "stats.json")
+    ) as f:
+        stats = json.load(f)
+        stats = stats["pitch"] + stats["energy"][:2]
+
+    fig = plot_mel(
+        [
+            (mel_prediction.cpu().numpy(), pitch, energy),
+            (mel_target.cpu().numpy(), pitch, energy),
+        ],
+        stats,
+        ["Synthetized Spectrogram", "Ground-Truth Spectrogram"],
+    )
+
+    if vocoder is not None:
+        from .model import vocoder_infer
+
+        wav_reconstruction = vocoder_infer(
+            mel_target.unsqueeze(0),
+            vocoder,
+            model_config,
+            preprocess_config,
+        )[0]
+        wav_prediction = vocoder_infer(
+            mel_prediction.unsqueeze(0),
+            vocoder,
+            model_config,
+            preprocess_config,
+        )[0]
+    else:
+        wav_reconstruction = wav_prediction = None
+
+    return fig, wav_reconstruction, wav_prediction, basename
+def synth_one_sample_final(targets, predictions, vocoder, model_config, preprocess_config):
     basename = targets[0][0]
     src_len = predictions[6][0].item()
     mel_len = predictions[7][0].item()

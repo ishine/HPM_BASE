@@ -9,45 +9,45 @@ from utils.hifigan_16_models import Generator
 from utils.istft_models import istft_Generator
 
 from utils.stft import TorchSTFT
-from model import HPM_Dubbing, ScheduledOptim
+# from model import HPM_Dubbing, ScheduledOptim
 
 MAX_WAV_VALUE = 32768.0
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def get_model(args, configs, device, train=False):
-    # (preprocess_config, model_config, train_config) = configs
-    (preprocess_config, model_config, train_config, preprocess_config2) = configs
-    model = HPM_Dubbing(preprocess_config, preprocess_config2, model_config).to(device)
-    if args.restore_step:
-        ckpt_path = os.path.join(
-            train_config["path"]["ckpt_path"],
-            "{}.pth.tar".format(args.restore_step),
-        )
-        ckpt = torch.load(ckpt_path)
-        # remove keys of pretrained model that are not in our model (i.e., embeeding layer)
-        model_dict = model.state_dict()
-        if model_config["learn_speaker"]:
-            speaker_emb_weight = ckpt["model"]["speaker_emb.weight"]
-            s, d = speaker_emb_weight.shape
-        ckpt["model"] = {k: v for k, v in ckpt["model"].items() \
-                         if k in model_dict and k != "speaker_emb.weight"}
-        model.load_state_dict(ckpt["model"], strict=False)
-        if model_config["learn_speaker"] and s <= model.state_dict()["speaker_emb.weight"].shape[0]:
-            model.state_dict()["speaker_emb.weight"][:s, :] = speaker_emb_weight
+# def get_model(args, configs, device, train=False):
+#     # (preprocess_config, model_config, train_config) = configs
+#     (preprocess_config, model_config, train_config, preprocess_config2) = configs
+#     model = HPM_Dubbing(preprocess_config, preprocess_config2, model_config).to(device)
+#     if args.restore_step:
+#         ckpt_path = os.path.join(
+#             train_config["path"]["ckpt_path"],
+#             "{}.pth.tar".format(args.restore_step),
+#         )
+#         ckpt = torch.load(ckpt_path)
+#         # remove keys of pretrained model that are not in our model (i.e., embeeding layer)
+#         model_dict = model.state_dict()
+#         if model_config["learn_speaker"]:
+#             speaker_emb_weight = ckpt["model"]["speaker_emb.weight"]
+#             s, d = speaker_emb_weight.shape
+#         ckpt["model"] = {k: v for k, v in ckpt["model"].items() \
+#                          if k in model_dict and k != "speaker_emb.weight"}
+#         model.load_state_dict(ckpt["model"], strict=False)
+#         if model_config["learn_speaker"] and s <= model.state_dict()["speaker_emb.weight"].shape[0]:
+#             model.state_dict()["speaker_emb.weight"][:s, :] = speaker_emb_weight
 
-    if train:
-        scheduled_optim = ScheduledOptim(
-            model, train_config, model_config, args.restore_step
-        )
-        # if args.restore_step:
-        #     scheduled_optim.load_state_dict(ckpt["optimizer"])
-        model.train()
-        return model, scheduled_optim
+#     if train:
+#         scheduled_optim = ScheduledOptim(
+#             model, train_config, model_config, args.restore_step
+#         )
+#         # if args.restore_step:
+#         #     scheduled_optim.load_state_dict(ckpt["optimizer"])
+#         model.train()
+#         return model, scheduled_optim
 
-    model.eval()
-    model.requires_grad_ = False
-    return model
+#     model.eval()
+#     model.requires_grad_ = False
+#     return model
 
 
 def get_param_num(model):

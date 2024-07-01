@@ -24,7 +24,7 @@ path:
   log_path: "./output/log/Chem"
   result_path: "./output/result/Chem"
 optimizer:
-  batch_size: 8
+  batch_size: 2
   betas: [0.9, 0.98]
   eps: 0.000000001
   weight_decay: 0.000001
@@ -33,10 +33,10 @@ optimizer:
   warm_up_step: 4000
   anneal_steps: [300000, 400000, 500000]
   anneal_rate: 0.3
-  init_lr: 0.00625
+  init_lr: 0.00005
 step:
-  total_step: 900
-  log_step: 10
-  synth_step: 25
+  total_step: 1000000
+  log_step: 2000
+  synth_step: 2000
   val_step: 25
   save_step: 
