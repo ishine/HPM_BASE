@@ -458,7 +458,7 @@ def main():
         sampler=train_sampler,
         batch_size=batch_size * group_size,
         shuffle=False,
-        num_workers=32,
+        num_workers=16,
         pin_memory=True,   
         collate_fn=train_dataset.collate_fn,
     )
@@ -582,7 +582,7 @@ def main():
                     
                 if step% 150000 ==0 and step!=0:
                     if local_rank ==0:
-                        save_checkpoint(model, optimizer, step, {**train_config,**model_config}})
+                        save_checkpoint(model, optimizer, step, {**train_config,**model_config})
                 if step == total_step:
                     if wandb_flag and local_rank==0:
                         wandb.finish()
