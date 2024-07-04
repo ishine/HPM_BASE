@@ -39,7 +39,7 @@ preprocessing:
     max_wav_value: 32768.0
   stft:
     filter_length: 1024  #
-    hop_length: 256 # For adapt the sampling rate of 16KHz
+    hop_length: 160 # For adapt the sampling rate of 16KHz
     win_length: 1024 # For adapt the sampling rate of 16KHz
   mel:
     n_mel_channels: 80

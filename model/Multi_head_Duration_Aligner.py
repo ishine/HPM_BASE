@@ -1,7 +1,5 @@
 import os
 import sys
-sys.path.append('/workspace/CODE/Jenny_Test')
-os.environ["CUDA_VISIBLE_DEVICES"] = "4"
 import json
 import copy
 import math
