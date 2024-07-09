@@ -5,10 +5,13 @@
 # 만 넣어서 Mel Generator -> Vocoder 수행
 # python -m torch.distributed.launch --nproc_per_node=6 /workspace/HPM_BASE/model/model_1.py
 # os and environ setting
+'''
+ python -m torch.distributed.launch --nproc_per_node=2 --master_port=29502 /workspace/HPM_BASE/model/model_1.py
+'''
 import os
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,4,5,7"
-
+os.environ["CUDA_VISIBLE_DEVICES"] = "4,5"
+os.environ['OMP_NUM_THREADS'] = '4'
 import distutils
 import distutils.version
 distutils.version.LooseVersion = lambda x: x
@@ -32,7 +35,6 @@ from torch.utils.checkpoint import checkpoint
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-from torch.utils.tensorboard import SummaryWriter
 from apex.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
@@ -94,9 +96,11 @@ def save_checkpoint(model, optimizer,amp, step, config):
         'config': config
     }
     if wandb_flag:
-        wandb.save(f"checkpoint_{step}.pth")
-        torch.save(state, f"checkpoint_{step}.pth")
-        wandb.log({"checkpoint":wandb.Artifact(f"checkpoint_{step}.pth", type="model")})
+        checkpoint_path = f"checkpoint_{step}.pth"
+        torch.save(state, checkpoint_path)
+        artifact = wandb.Artifact(f"checkpoint_{step}", type="model")
+        artifact.add_file(checkpoint_path)
+        wandb.log_artifact(artifact)
         wandb.save('model_1.py')
         wandb.config.update({'model_structure':str(model)})
     print(f"Saved checkpoint at step {step}")
@@ -319,8 +323,6 @@ class HPM_Dubb_1_Loss(nn.Module):
         '''
         src_masks = ~src_masks
         mel_masks = ~mel_masks
-        # Clamp mel_lens to a maximum of 1000
-        max_length = 1000
         # mel_lens = torch.clamp(mel_lens, max=max_length)
         mel_targets = mel_targets[:, : mel_masks.shape[1], :]
         mel_masks = mel_masks[:, :mel_masks.shape[1]]
@@ -342,12 +344,14 @@ class HPM_Dubb_1_Loss(nn.Module):
         mel_loss = self.mae_loss(mel_predictions, mel_targets)
         postnet_mel_loss = self.mae_loss(postnet_mel_predictions, mel_targets)
         
+
+        
         #pitch, energy
         # total_loss = L_s
         # L_s = lambda_1*L_mel + L_postnet + L_v2c1 + L_v2c2 + L_ctc1 + L_ctc2
         total_loss = (
-            1.05*mel_loss + 
-            1.05*postnet_mel_loss + 
+            1.5*mel_loss + 
+            1.5*postnet_mel_loss + 
             mse_loss_v2c1 + 
             mse_loss_v2c2 + 
             0.01 * CTC_loss_MDA_video 
@@ -421,18 +425,18 @@ def log_gpu_status():
     if wandb_flag:
         wandb.log(gpu_status)
 def main():
-    checkpoint_path = train_config["path"]["ckpt_path"]
-    os.makedirs(checkpoint_path, exist_ok=True)
     
 # wandb 초기화
     train_config = yaml.load(
         open("/workspace/HPM_BASE/config/Chem/train.yaml", "r"), Loader=yaml.FullLoader
     )
+    checkpoint_path = train_config["path"]["ckpt_path"]
+    os.makedirs(checkpoint_path, exist_ok=True)
     
     local_rank = int(os.environ['LOCAL_RANK'])
     if local_rank==0:
         if wandb_flag:
-            wandb.init(project="HPM_step1_test1", config={**train_config,**model_config})
+            wandb.init(project="HPM_step1_test2", config={**train_config,**model_config})
             # GPU 상태 설정
             wandb.config.log_gpu_status = True
     dist.init_process_group(backend='nccl')
@@ -497,10 +501,10 @@ def main():
     grad_clip_thresh = train_config["optimizer"]["grad_clip_thresh"]
     total_step = train_config["step"]["total_step"]
     log_step = train_config["step"]["log_step"]
-    save_step = train_config["step"]["save_step"]
+    
     synth_step = train_config["step"]["synth_step"]
-    val_step = train_config["step"]["val_step"]
-    loss_model = model_config["loss_function"]["model"]
+    
+    
 
     outer_bar = tqdm(total=total_step, desc="Training", position=0)
     outer_bar.n =0
@@ -525,11 +529,18 @@ def main():
                 total_loss = total_loss / grad_acc_step
                 # total_loss.backward()
                             # Backward
-                optimizer.zero_grad()
+                
                 with amp.scale_loss(total_loss, optimizer) as scaled_loss:
                     scaled_loss.backward()
                 # nn.utils.clip_grad_norm_(model.parameters(), grad_clip_thresh)
                 # optimizer.step()
+
+                if step % grad_acc_step == 0:
+                #     # Clipping gradients to avoid gradient explosion
+                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip_thresh)
+                #     # Update weights
+                    optimizer.step_and_update_lr()
+                    optimizer.zero_grad()
 
                 if wandb_flag and local_rank==0 and step % log_step==0:
                     current_lr = optimizer.get_lr()
@@ -547,15 +558,6 @@ def main():
                     }
                 # wandb logging
                     wandb.log(log_dict)
-
-                if step % grad_acc_step == 0:
-                #     # Clipping gradients to avoid gradient explosion
-                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip_thresh)
-
-                #     # Update weights
-                    optimizer.step_and_update_lr()
-                    optimizer.zero_grad()
-
                 if step % synth_step == 0:
                     if local_rank==0:
                         log_gpu_status()
@@ -582,7 +584,8 @@ def main():
                     
                 if step% 150000 ==0 and step!=0:
                     if local_rank ==0:
-                        save_checkpoint(model, optimizer, step, {**train_config,**model_config})
+                        combined_config = {**train_config, **model_config}
+                        save_checkpoint(model, optimizer,amp, step, combined_config)
                 if step == total_step:
                     if wandb_flag and local_rank==0:
                         wandb.finish()
