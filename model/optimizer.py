@@ -12,8 +12,9 @@ class ScheduledOptim(torch.optim.Optimizer):
         self.anneal_steps = train_config["optimizer"]["anneal_steps"]
         self.anneal_rate = train_config["optimizer"]["anneal_rate"]
         self.current_step = current_step
-        self.init_lr = float(train_config["optimizer"]["init_lr"])
-
+        #self.init_lr = np.power(model_config["transformer"]["encoder_hidden"], -0.5)
+        # self.init_lr = float(train_config["optimizer"]["init_lr"])
+        self.init_lr = np.power(model_config["transformer"]["encoder_hidden"], -0.5)
         # Optimizer의 param_groups를 직접 사용
         super().__init__(self._optimizer.param_groups, {})
 
